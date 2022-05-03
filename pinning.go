@@ -25,7 +25,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-func (cm *ContentManager) pinStatus(cont Content) (*types.IpfsPinStatus, error) {
+func (cm *ContentManager) pinStatus(cont util.Content) (*types.IpfsPinStatus, error) {
 	cm.pinLk.Lock()
 	po, ok := cm.pinJobs[cont.ID]
 	cm.pinLk.Unlock()
@@ -66,7 +66,7 @@ func (cm *ContentManager) pinStatus(cont Content) (*types.IpfsPinStatus, error) 
 	return status, nil
 }
 
-func (cm *ContentManager) pinDelegatesForContent(cont Content) []string {
+func (cm *ContentManager) pinDelegatesForContent(cont util.Content) []string {
 	if cont.Location == "local" {
 		var out []string
 		for _, a := range cm.Host.Addrs() {
@@ -135,7 +135,7 @@ func (s *Server) doPinning(ctx context.Context, op *pinner.PinningOperation, cb 
 }
 
 func (cm *ContentManager) refreshPinQueue() error {
-	var toPin []Content
+	var toPin []util.Content
 	if err := cm.DB.Find(&toPin, "active = false and pinning = true and not aggregate").Error; err != nil {
 		return err
 	}
@@ -176,7 +176,7 @@ func (cm *ContentManager) pinContent(ctx context.Context, user uint, obj cid.Cid
 		metab = string(b)
 	}
 
-	cont := Content{
+	cont := util.Content{
 		Cid: util.DbCID{obj},
 
 		Name:        name,
@@ -223,7 +223,7 @@ func (cm *ContentManager) pinContent(ctx context.Context, user uint, obj cid.Cid
 	return cm.pinStatus(cont)
 }
 
-func (cm *ContentManager) addPinToQueue(cont Content, peers []peer.AddrInfo, replace uint) {
+func (cm *ContentManager) addPinToQueue(cont util.Content, peers []peer.AddrInfo, replace uint) {
 	if cont.Location != "local" {
 		log.Errorf("calling addPinToQueue on non-local content")
 	}
@@ -248,7 +248,7 @@ func (cm *ContentManager) addPinToQueue(cont Content, peers []peer.AddrInfo, rep
 	cm.pinMgr.Add(op)
 }
 
-func (cm *ContentManager) pinContentOnShuttle(ctx context.Context, cont Content, peers []peer.AddrInfo, replace uint, handle string) error {
+func (cm *ContentManager) pinContentOnShuttle(ctx context.Context, cont util.Content, peers []peer.AddrInfo, replace uint, handle string) error {
 	ctx, span := cm.tracer.Start(ctx, "pinContentOnShuttle", trace.WithAttributes(
 		attribute.String("handle", handle),
 		attribute.String("CID", cont.Cid.CID.String()),
@@ -364,7 +364,7 @@ func (cm *ContentManager) selectLocationForContent(ctx context.Context, obj cid.
 	return shuttles[0].Handle, nil
 }
 
-func (cm *ContentManager) selectLocationForRetrieval(ctx context.Context, cont Content) (string, error) {
+func (cm *ContentManager) selectLocationForRetrieval(ctx context.Context, cont util.Content) (string, error) {
 	ctx, span := cm.tracer.Start(ctx, "selectLocationForRetrieval")
 	defer span.End()
 
@@ -440,7 +440,7 @@ func (s *Server) handleListPins(e echo.Context, u *User) error {
 	qlimit := e.QueryParam("limit")
 	qreqids := e.QueryParam("requestid")
 
-	q := s.DB.Model(Content{}).Where("user_id = ? and not aggregate", u.ID).Order("created_at desc")
+	q := s.DB.Model(util.Content{}).Where("user_id = ? and not aggregate", u.ID).Order("created_at desc")
 
 	if qcids != "" {
 		var cids []util.DbCID
@@ -535,7 +535,7 @@ func (s *Server) handleListPins(e echo.Context, u *User) error {
 		q = q.Limit(lim)
 	}
 
-	var contents []Content
+	var contents []util.Content
 	if err := q.Scan(&contents).Error; err != nil {
 		return err
 	}
@@ -720,7 +720,7 @@ func (s *Server) handleGetPin(e echo.Context, u *User) error {
 		return err
 	}
 
-	var content Content
+	var content util.Content
 	if err := s.DB.First(&content, "id = ?", uint(id)).Error; err != nil {
 		return err
 	}
@@ -759,7 +759,7 @@ func (s *Server) handleReplacePin(e echo.Context, u *User) error {
 		return err
 	}
 
-	var content Content
+	var content util.Content
 	if err := s.DB.First(&content, "id = ?", id).Error; err != nil {
 		return err
 	}
@@ -808,7 +808,7 @@ func (s *Server) handleDeletePin(e echo.Context, u *User) error {
 		return err
 	}
 
-	var content Content
+	var content util.Content
 	if err := s.DB.First(&content, "id = ?", id).Error; err != nil {
 		return err
 	}
@@ -838,7 +838,7 @@ func (cm *ContentManager) UpdatePinStatus(handle string, cont uint, status strin
 
 	op.SetStatus(status)
 	if status == "failed" {
-		var c Content
+		var c util.Content
 		if err := cm.DB.First(&c, "id = ?", cont).Error; err != nil {
 			log.Errorf("failed to look up content: %s", err)
 			return
@@ -849,7 +849,7 @@ func (cm *ContentManager) UpdatePinStatus(handle string, cont uint, status strin
 			return
 		}
 
-		if err := cm.DB.Model(Content{}).Where("id = ?", cont).UpdateColumns(map[string]interface{}{
+		if err := cm.DB.Model(util.Content{}).Where("id = ?", cont).UpdateColumns(map[string]interface{}{
 			"active":  false,
 			"pinning": false,
 			"failed":  true,
@@ -863,14 +863,14 @@ func (cm *ContentManager) handlePinningComplete(ctx context.Context, handle stri
 	ctx, span := cm.tracer.Start(ctx, "handlePinningComplete")
 	defer span.End()
 
-	var cont Content
+	var cont util.Content
 	if err := cm.DB.First(&cont, "id = ?", pincomp.DBID).Error; err != nil {
 		return xerrors.Errorf("got shuttle pin complete for unknown content %d (shuttle = %s): %w", pincomp.DBID, handle, err)
 	}
 
 	if cont.Active {
 		// content already active, no need to add objects, just update location
-		if err := cm.DB.Model(Content{}).Where("id = ?", cont.ID).UpdateColumns(map[string]interface{}{
+		if err := cm.DB.Model(util.Content{}).Where("id = ?", cont.ID).UpdateColumns(map[string]interface{}{
 			"location": handle,
 		}).Error; err != nil {
 			return err
@@ -881,7 +881,7 @@ func (cm *ContentManager) handlePinningComplete(ctx context.Context, handle stri
 	}
 
 	if cont.Aggregate {
-		if err := cm.DB.Model(Content{}).Where("id = ?", cont.ID).UpdateColumns(map[string]interface{}{
+		if err := cm.DB.Model(util.Content{}).Where("id = ?", cont.ID).UpdateColumns(map[string]interface{}{
 			"active":   true,
 			"pinning":  false,
 			"location": handle,
@@ -891,9 +891,9 @@ func (cm *ContentManager) handlePinningComplete(ctx context.Context, handle stri
 		return nil
 	}
 
-	objects := make([]*Object, 0, len(pincomp.Objects))
+	objects := make([]*util.Object, 0, len(pincomp.Objects))
 	for _, o := range pincomp.Objects {
-		objects = append(objects, &Object{
+		objects = append(objects, &util.Object{
 			Cid:  util.DbCID{o.Cid},
 			Size: o.Size,
 		})
