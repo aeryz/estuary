@@ -3176,14 +3176,28 @@ func (s *Server) handleCommitCollection(c echo.Context, u *User) error {
 	if err := s.DB.Model(CollectionRef{}).
 		Where("collection = ?", col.ID).
 		Joins("left join contents on contents.id = collection_refs.content").
-		Select("contents.*").
+		Select("contents.*, collection_refs.path").
 		Scan(&contents).Error; err != nil {
 		return err
 	}
 
+	bserv := blockservice.New(s.Node.Blockstore, nil)
+	dserv := merkledag.NewDAGService(bserv)
+
+	// create DAG respecting directory structure
 	collectionNode := unixfs.EmptyDirNode()
+	dserv.Add(context.Background(), collectionNode)
 	for _, c := range contents {
-		collectionNode.AddRawLink(c.Name, &ipld.Link{
+		dirs, err := util.DirsFromPath(c.Path, c.Name)
+		if err != nil {
+			return err
+		}
+
+		lastDirNode, err := util.EnsurePathIsLinked(dirs, collectionNode, dserv)
+		if err != nil {
+			return err
+		}
+		lastDirNode.AddRawLink(c.Name, &ipld.Link{
 			Size: uint64(c.Size),
 			Cid:  c.Cid.CID,
 		})
